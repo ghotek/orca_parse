@@ -5,7 +5,9 @@ import re
 from dataclasses import dataclass
 
 import numpy as np
+
 from numpy.typing import NDArray
+from typing import Any
 
 
 def read_orca_output(path: str | os.PathLike) -> list[str]:
@@ -26,10 +28,13 @@ class SpectrumData:
     transition: list[str]
 
 @dataclass
-class OrbitalData:
-    no:        list[int]
-    energy:    NDArray[np.float64]
-    occupancy: NDArray[np.float64]
+class MolecularOrbitalData:
+    no:        list[int] = None
+    energy:    NDArray[np.float64] = None
+    occupancy: NDArray[np.float64] = None
+
+    ao_contributions: NDArray[np.float64] = None
+    ao_labels       : list[str]           = None
 
 @dataclass
 class ExcitedStateData:
@@ -89,7 +94,7 @@ class OrcaParser:
             transition=transition
         )
     
-    def get_orbital_energies(self, Eh: bool = False) -> OrbitalData:
+    def get_orbital_energies(self, Eh: bool = False) -> MolecularOrbitalData:
         header_i = 0
         for j, line in enumerate(self.raw):
             if "ORBITAL ENERGIES" in line:
@@ -115,19 +120,19 @@ class OrcaParser:
                 energy.append(float(line_[2]))
             occupancy.append(float(line_[1]))
 
-        return OrbitalData(
+        return MolecularOrbitalData(
             no=no,
             energy=np.array(energy, dtype=np.float64),
             occupancy=np.array(occupancy, dtype=np.float64)
         )
 
-    def get_excited_states(self, soc_corrected: bool = False) -> ExcitedStateData:
+    def get_excited_states(
+            self, au: bool = False
+            ) -> ExcitedStateData:
         EXCITED_STATE_LINE_RE = re.compile(
-            r'STATE\s+\d+:\s+E=\s+\d+\.\d+\s+au\s+\d+\.\d+\s+eV'
+            r'^STATE\s+(\d+)(?:\s+[^\:]+)?\s*:\s*E=\s*([+-]?\d+(?:\.\d+)?)\s*au\s*([+-]?\d+(?:\.\d+)?)\s*eV'
             )
-        EXCITED_STATE_RE  = re.compile(r'STATE\s+(\d+):')
-        ENERGY_RE = re.compile(r'(\d+\.\d+)\s+eV')
-        MULT_RE   = re.compile(r'Mult\s+(\d)')
+        MULT_RE   = re.compile(r'\bMult\s*=?\s*(\d+)\b')
 
         state  = []
         energy = []
@@ -136,16 +141,15 @@ class OrcaParser:
         excited_states_indices = []
         for i in range(len(self.raw)):
             line = self.raw[i]
-            if re.match(EXCITED_STATE_LINE_RE, line):
-                state_match = re.search(EXCITED_STATE_RE, line)
-                if state_match:
-                    state_val = int(state_match.group(1))
-                    state.append(state_val)
+            excited_state_match = re.match(EXCITED_STATE_LINE_RE, line)
+            if excited_state_match:
+                state_val = int(excited_state_match.group(1))
+                state.append(state_val)
 
-                energy_match = re.search(ENERGY_RE, line)
-                if energy_match:
-                    energy_val = float(energy_match.group(1))
-                    energy.append(energy_val)
+                energy_val = float(excited_state_match.group(3))
+                if au:
+                    energy_val = float(excited_state_match.group(2))
+                energy.append(energy_val)
 
                 mult_match = re.search(MULT_RE, line)
                 if mult_match:
@@ -196,6 +200,83 @@ class OrcaParser:
             weights=weights
         )
     
+    def parse_single_point_calc(self) -> MolecularOrbitalData:
+        orbitals = self.get_orbital_energies()
+        no = orbitals.no
+        energy = orbitals.energy
+        occupancy = orbitals.occupancy
+        
+        MO_NUMBER_RE = re.compile(r'^\s*\d+(\s+\d+)*\s*$')
+        AO_LABEL_RE  = re.compile(r'^\s*\d+[A-Za-z]+\s+\d*[spdfg][\w\d+-]*')
+
+        ao_labels = []
+
+        i = 0
+        while i < len(self.raw):
+            line = self.raw[i].strip()
+            if not line:
+                i += 1
+                continue
+            
+            if re.match(MO_NUMBER_RE, line):
+                mo_numbers = list(map(int, line.split()))
+                
+                i += 2
+                
+                current_mo_block = mo_numbers
+                i += 1
+                continue
+                
+            if line.startswith('--------'):
+                i += 1
+                continue
+                
+            if (current_mo_block is not None and re.match(AO_LABEL_RE, line)):
+                parts = line.split()
+                if len(parts) >= 2 + len(current_mo_block):
+                    atom_label = parts[0]
+                    orbital_label   = parts[1]
+                    ao_label = f"{atom_label}_{orbital_label}"
+                    
+                    try:
+                        coefficients = list(map(float, parts[2:2+len(current_mo_block)]))
+                        
+                        if ao_label not in ao_labels:
+                            ao_labels.append(ao_label)
+                        
+                        # Сохраняем коэффициенты для каждого MO в текущем блоке
+                        for mo_num, coeff in zip(current_mo_block, coefficients):
+                            ao_data[atom_label][mo_num] = coeff
+                    except ValueError:
+                        # Пропускаем строки, которые не удается преобразовать
+                        pass
+            
+            i += 1
+        
+        # Создаем DataFrame
+        if not ao_data:
+            return pd.DataFrame(), pd.Series(), pd.Series()
+        
+        # Получаем все номера MO и сортируем их
+        all_mo_numbers = sorted(set().union(*[set(ao_data[ao].keys()) for ao in ao_data]))
+        
+        # Создаем матрицу коэффициентов
+        ao_names = ao_data.keys()
+        coefficient_matrix = []
+        
+        for ao in ao_names:
+            row = [ao_data[ao].get(mo, 0.0) for mo in all_mo_numbers]
+            coefficient_matrix.append(row)
+        
+        # Создаем DataFrame
+        columns = [f'{mo}' for mo in all_mo_numbers]
+        df = pd.DataFrame(coefficient_matrix, index=ao_names, columns=columns)
+        
+        # Создаем Series для энергий и occupancies
+        energy_series = pd.Series({f'{mo}': mo_energies.get(mo, np.nan) for mo in all_mo_numbers})
+        occupancy_series = pd.Series({f'{mo}': mo_occupancies.get(mo, np.nan) for mo in all_mo_numbers})
+
+        return df, energy_series, occupancy_series
 
 if __name__ == "__main__":
     parser = OrcaParser("tests/xanes.out")
@@ -209,5 +290,5 @@ if __name__ == "__main__":
     for state, energy in zip(excited_states.state, excited_states.energy):
         print(f"{state: 5d} {energy: 10.3f}")
 
-    for n, energy in zip(orbitals.no, orbitals.energy):
-        print(f"{n: 3d} {energy: 10.3f}")
+    # for n, energy in zip(orbitals.no, orbitals.energy):
+    #     print(f"{n: 3d} {energy: 10.3f}")
