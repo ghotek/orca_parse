@@ -33,8 +33,80 @@ class MolecularOrbitalData:
     energy:    NDArray[np.float64] = None
     occupancy: NDArray[np.float64] = None
 
-    ao_contributions: NDArray[np.float64] = None
-    ao_labels       : list[str]           = None
+    ao_coefficients: NDArray[np.float64] = None
+    ao_labels      : list[str]           = None
+
+    def print_top_ao2mo(
+            self, from_mo: int, to_mo: int,
+            atom_labels: list[str], ao_thr: float = 0.1
+        ) -> None:
+        MO_INFO_TEMPLATE =     "MO {0:3s} {1:14.10}eV:"
+        POS_HTOP_AO_TEMPLATE = "+   {0:4s}  {1}"
+        POS_TOP_AO_TEMPLATE  = "    {0:4s}  {1}"
+        NEG_HTOP_AO_TEMPLATE = "-   {0:4s}  {1}"
+        NEG_TOP_AO_TEMPLATE  = "    {0:4s}  {1}"
+    
+        AO_COEFFS_TEMPLATE = "{0:6s} ({1:6.3f})"
+
+        MOs = [int(i) for i in range(from_mo, to_mo)]
+        for mo in MOs:
+            print(MO_INFO_TEMPLATE.format(str(mo), self.energy[mo]))
+            sorted_indices = np.argsort(np.abs(self.ao_coefficients[mo]))[::-1]
+            
+            sdict_ = {
+                "positive": {},
+                "negative": {}
+            }
+            for atom_label in atom_labels:
+                sdict_["positive"][atom_label] = ""
+                sdict_["negative"][atom_label] = ""
+
+            for ao_i in sorted_indices:
+                if not np.greater_equal(np.abs(self.ao_coefficients[mo][ao_i]), ao_thr):
+                    continue
+                
+                if self.ao_coefficients[mo][ao_i] > 0.0:
+                    key = "positive"
+                else:
+                    key = "negative"
+                
+                for atom_label in atom_labels:
+                    if atom_label in self.ao_labels[ao_i]:
+                        name = atom_label
+                        rp_ = atom_label + '_'
+                    else:
+                        continue
+
+                    sdict_[key][name] += AO_COEFFS_TEMPLATE.format(
+                        self.ao_labels[ao_i].replace(rp_, ''), self.ao_coefficients[mo][ao_i]
+                        ) + 5 * ' '
+
+            for atom_label_i in range(len(atom_labels)):
+                atom_label = atom_labels[atom_label_i]
+                if atom_label_i == 0:
+                    print(POS_HTOP_AO_TEMPLATE.format(
+                        atom_label, sdict_["positive"][atom_label])
+                        )
+                    continue
+
+                print(POS_TOP_AO_TEMPLATE.format(
+                    atom_label, sdict_["positive"][atom_label])
+                    )
+            print()
+
+            for atom_label_i in range(len(atom_labels)):
+                atom_label = atom_labels[atom_label_i]
+                if atom_label_i == 0:
+                    print(NEG_HTOP_AO_TEMPLATE.format(
+                        atom_label, sdict_["negative"][atom_label])
+                        )
+                    continue
+
+                print(NEG_TOP_AO_TEMPLATE.format(
+                    atom_label, sdict_["negative"][atom_label])
+                    )
+            print('\n')
+              
 
 @dataclass
 class ExcitedStateData:
@@ -100,25 +172,25 @@ class OrcaParser:
             if "ORBITAL ENERGIES" in line:
                 header_i = j
                 break
-        
-        orbital_table = ''.join(self.raw[header_i:]).split('*')[0]
+            
+        ORBITAL_ENERGY_LINE_RE = re.compile(
+            r'^\s+(\d+)\s+([+-]?\d+(?:\.\d+)?)\s+([+-]?\d+(?:\.\d+)?)\s+([+-]?\d+(?:\.\d+)?)'
+        )
+
         no = []
         energy = []
         occupancy = []
-        for line in orbital_table.splitlines()[4:]:
-            if len(line) == 0:
-                continue
+        for line in self.raw[header_i + 4:]:
+            orbital_energy_match = re.match(ORBITAL_ENERGY_LINE_RE, line)
+            if not orbital_energy_match:
+                break
 
-            line_ = re.split(r'\s+', line)
-            if len(line_[0]) == 0:
-                line_ = line_[1:]
-
-            no.append(int(line_[0]))
+            no.append(orbital_energy_match.group(1))
             if Eh:
-                energy.append(float(line_[3]))
+                energy.append(orbital_energy_match.group(3))
             else:
-                energy.append(float(line_[2]))
-            occupancy.append(float(line_[1]))
+                energy.append(orbital_energy_match.group(4))
+            occupancy.append(orbital_energy_match.group(2))
 
         return MolecularOrbitalData(
             no=no,
@@ -200,16 +272,19 @@ class OrcaParser:
             weights=weights
         )
     
-    def parse_single_point_calc(self) -> MolecularOrbitalData:
-        orbitals = self.get_orbital_energies()
+    def get_ao_coefficients(self, Eh: bool = False) -> MolecularOrbitalData:
+        orbitals = self.get_orbital_energies(Eh=Eh)
         no = orbitals.no
         energy = orbitals.energy
         occupancy = orbitals.occupancy
         
-        MO_NUMBER_RE = re.compile(r'^\s*\d+(\s+\d+)*\s*$')
-        AO_LABEL_RE  = re.compile(r'^\s*\d+[A-Za-z]+\s+\d*[spdfg][\w\d+-]*')
+        MO_NUMBER_RE   = re.compile(r'^\s*\d+(\s+\d+)*\s*$')
+        AO_LABEL_RE    = re.compile(r'^\s*\d+[A-Za-z]+\s+\d*[spdfg][\w\d+-]*')
+        COEFF_VALUE_RE = re.compile(r'([+-]?\d*\.\d+)')
 
         ao_labels = []
+        ao_coefficients_dict = {}
+        current_mo_block = None
 
         i = 0
         while i < len(self.raw):
@@ -220,7 +295,6 @@ class OrcaParser:
             
             if re.match(MO_NUMBER_RE, line):
                 mo_numbers = list(map(int, line.split()))
-                
                 i += 2
                 
                 current_mo_block = mo_numbers
@@ -233,62 +307,66 @@ class OrcaParser:
                 
             if (current_mo_block is not None and re.match(AO_LABEL_RE, line)):
                 parts = line.split()
-                if len(parts) >= 2 + len(current_mo_block):
-                    atom_label = parts[0]
-                    orbital_label   = parts[1]
+                
+                coefficients_match = re.findall(COEFF_VALUE_RE, line)
+                if len(coefficients_match) == len(current_mo_block):
+                    atom_label    = parts[0]
+                    orbital_label = parts[1]
                     ao_label = f"{atom_label}_{orbital_label}"
                     
                     try:
-                        coefficients = list(map(float, parts[2:2+len(current_mo_block)]))
-                        
+                        coefficients = list(map(float, coefficients_match))
                         if ao_label not in ao_labels:
                             ao_labels.append(ao_label)
-                        
-                        # Сохраняем коэффициенты для каждого MO в текущем блоке
+
+                        if ao_label not in ao_coefficients_dict:
+                            ao_coefficients_dict[ao_label] = {}
+
                         for mo_num, coeff in zip(current_mo_block, coefficients):
-                            ao_data[atom_label][mo_num] = coeff
+                            ao_coefficients_dict[ao_label][mo_num] = coeff
                     except ValueError:
-                        # Пропускаем строки, которые не удается преобразовать
                         pass
+                else:
+                    raise ValueError(f"Can't parse this line: {line}")
             
             i += 1
         
-        # Создаем DataFrame
-        if not ao_data:
-            return pd.DataFrame(), pd.Series(), pd.Series()
-        
-        # Получаем все номера MO и сортируем их
-        all_mo_numbers = sorted(set().union(*[set(ao_data[ao].keys()) for ao in ao_data]))
-        
-        # Создаем матрицу коэффициентов
-        ao_names = ao_data.keys()
-        coefficient_matrix = []
-        
-        for ao in ao_names:
-            row = [ao_data[ao].get(mo, 0.0) for mo in all_mo_numbers]
-            coefficient_matrix.append(row)
-        
-        # Создаем DataFrame
-        columns = [f'{mo}' for mo in all_mo_numbers]
-        df = pd.DataFrame(coefficient_matrix, index=ao_names, columns=columns)
-        
-        # Создаем Series для энергий и occupancies
-        energy_series = pd.Series({f'{mo}': mo_energies.get(mo, np.nan) for mo in all_mo_numbers})
-        occupancy_series = pd.Series({f'{mo}': mo_occupancies.get(mo, np.nan) for mo in all_mo_numbers})
+        ao_coefficients = np.zeros(
+            shape=(len(no), len(ao_coefficients_dict)), dtype=np.float64
+            )
+        for i in range(ao_coefficients.shape[0]):
+            for j in range(ao_coefficients.shape[1]):
+                ao_key = list(ao_coefficients_dict.keys())[j]
+                no_key = list(ao_coefficients_dict[ao_key].keys())[i]
 
-        return df, energy_series, occupancy_series
+                ao_coefficients[i][j] = ao_coefficients_dict[ao_key][no_key]
+        
+        return MolecularOrbitalData(
+            no=no, energy=energy, occupancy=occupancy,
+            ao_coefficients=ao_coefficients, ao_labels=ao_labels
+        )
 
 if __name__ == "__main__":
-    parser = OrcaParser("tests/xanes.out")
+    # parser = OrcaParser("tests/xanes.out")
 
-    xanes = parser.get_absorption_spectrum()
-    orbitals = parser.get_orbital_energies()
-    excited_states = parser.get_excited_states()
+    # xanes = parser.get_absorption_spectrum()
+    # orbitals = parser.get_orbital_energies()
+    # excited_states = parser.get_excited_states()
 
+    # ao_parser = OrcaParser("tests/single_point_calc.out")
+    # ao_coefficients = ao_parser.get_ao_coefficients()
+
+    # ao_coefficients.print_top_ao2mo(0, 2, ['Au', '1S', '3S'])
+
+    parser = OrcaParser(
+        "tests/single_point_calc.log"
+        )
+    ao_coefficients = parser.get_ao_coefficients()
+    ao_coefficients.print_top_ao2mo(54, 58, ['0Au', '1S', '3S'])
     # print(orbitals.energy)
     # print(xanes.transition)
-    for state, energy in zip(excited_states.state, excited_states.energy):
-        print(f"{state: 5d} {energy: 10.3f}")
+    # for state, energy in zip(excited_states.state, excited_states.energy):
+    #     print(f"{state: 5d} {energy: 10.3f}")
 
     # for n, energy in zip(orbitals.no, orbitals.energy):
     #     print(f"{n: 3d} {energy: 10.3f}")
