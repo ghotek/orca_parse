@@ -347,26 +347,40 @@ class OrcaParser:
         )
 
 if __name__ == "__main__":
-    # parser = OrcaParser("tests/xanes.out")
+    spectrum_parser = OrcaParser("tests/xanes.out")
+    xanes = spectrum_parser.get_absorption_spectrum(soc_corrected=False)
+    energies = spectrum_parser.get_orbital_energies()
+    states = spectrum_parser.get_excited_states()
 
-    # xanes = parser.get_absorption_spectrum()
-    # orbitals = parser.get_orbital_energies()
-    # excited_states = parser.get_excited_states()
+    sp_calc_parser = OrcaParser("tests/single_point_calc.out")
+    orbitals = sp_calc_parser.get_ao_coefficients()
 
-    # ao_parser = OrcaParser("tests/single_point_calc.out")
-    # ao_coefficients = ao_parser.get_ao_coefficients()
+    mask = np.argsort(xanes.absorption)[::-1][:10]
+    sign_transitions = [xanes.transition[i] for i in mask]
 
-    # ao_coefficients.print_top_ao2mo(0, 2, ['Au', '1S', '3S'])
+    TRANSITION_RE = r'(\d+)-\d*[.]?\d+A->(\d+)-\d*[.]?\d+A'
+    sign_states = []
+    for tr in sign_transitions:
+        tr_match = re.match(TRANSITION_RE, tr)
+        if tr_match:
+            sign_states.append(
+                (int(tr_match.group(1)), int(tr_match.group(2)))
+                )
+            
+    for tr in sign_states:
+        final_state = tr[1]
+        final_state_i = states.state.index(final_state)
 
-    parser = OrcaParser(
-        "tests/single_point_calc.log"
-        )
-    ao_coefficients = parser.get_ao_coefficients()
-    ao_coefficients.print_top_ao2mo(54, 58, ['0Au', '1S', '3S'])
-    # print(orbitals.energy)
-    # print(xanes.transition)
-    # for state, energy in zip(excited_states.state, excited_states.energy):
-    #     print(f"{state: 5d} {energy: 10.3f}")
-
-    # for n, energy in zip(orbitals.no, orbitals.energy):
-    #     print(f"{n: 3d} {energy: 10.3f}")
+        for mo_tr in states.transitions[final_state_i]:
+            print("Transition from {} MO to {} MO".format(mo_tr[0], mo_tr[1]))
+            print("Atomic orbital contributions of {} MO".format(mo_tr[0]))
+            orbitals.print_top_ao2mo(
+                from_mo=mo_tr[0], to_mo=mo_tr[0] + 1, atom_labels=['0Au', '1S', '3S']
+                )
+            
+            print("Atomic orbital contributions of {} MO".format(mo_tr[1]))
+            orbitals.print_top_ao2mo(
+                from_mo=mo_tr[1], to_mo=mo_tr[1] + 1, atom_labels=['0Au', '1S', '3S']
+                )
+            
+            print('\n' + '-' * 100 + '\n')
