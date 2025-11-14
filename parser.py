@@ -409,12 +409,15 @@ def print_top_states_info(
                 (int(tr_match.group(1)), int(tr_match.group(2)))
                 )
             
+    HEADER_TEMPLATE = "State {0:<3d} ({1:9.8}eV) - Transition from {2:3d} MO to {3:3d} MO"
     for tr in sign_states:
         final_state = tr[1]
         final_state_i = states.state.index(final_state)
 
         for mo_tr in states.transitions[final_state_i]:
-            header = "Transition from {0:3d} MO to {1:3d} MO".format(mo_tr[0], mo_tr[1])
+            header = HEADER_TEMPLATE.format(
+                final_state, np.round(states.energy[final_state_i], 3), mo_tr[0], mo_tr[1]
+                ).center(80)
             print(header)
             print(
                 "-" * int((len(header) / 2 - 3)) + " FROM " + "-" * int((len(header) / 2 - 3))
