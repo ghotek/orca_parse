@@ -58,8 +58,8 @@ class MolecularOrbitalData:
                 "negative": {}
             }
             for atom_label in atom_labels:
-                sdict_["positive"][atom_label] = ""
-                sdict_["negative"][atom_label] = ""
+                sdict_["positive"][atom_label] = []
+                sdict_["negative"][atom_label] = []
 
             for ao_i in sorted_indices:
                 if not np.greater_equal(np.abs(self.ao_coefficients[mo][ao_i]), ao_thr):
@@ -74,37 +74,73 @@ class MolecularOrbitalData:
                     if atom_label in self.ao_labels[ao_i]:
                         name = atom_label
                         rp_ = atom_label + '_'
-                    else:
-                        continue
-
-                    sdict_[key][name] += AO_COEFFS_TEMPLATE.format(
-                        self.ao_labels[ao_i].replace(rp_, ''), self.ao_coefficients[mo][ao_i]
-                        ) + 5 * ' '
+                    
+                        formated_ao_coeff = AO_COEFFS_TEMPLATE.format(
+                            self.ao_labels[ao_i].replace(rp_, ''), self.ao_coefficients[mo][ao_i]
+                            )
+                        sdict_[key][name].append(formated_ao_coeff)
+                        break
 
             for atom_label_i in range(len(atom_labels)):
                 atom_label = atom_labels[atom_label_i]
-                if atom_label_i == 0:
-                    print(POS_HTOP_AO_TEMPLATE.format(
-                        atom_label, sdict_["positive"][atom_label])
-                        )
-                    continue
+                pos_coeffs = sdict_["positive"][atom_label]
 
-                print(POS_TOP_AO_TEMPLATE.format(
-                    atom_label, sdict_["positive"][atom_label])
-                    )
+                if not pos_coeffs:
+                    if atom_label_i == 0:
+                        print(POS_HTOP_AO_TEMPLATE.format(
+                            atom_label, "")
+                            )
+                    else:
+                        print(POS_TOP_AO_TEMPLATE.format(
+                            atom_label, "")
+                            )
+                else:
+                    lines = []
+                    for i in range(0, len(pos_coeffs), 3):
+                        line = (5 * ' ').join(pos_coeffs[i:i + 3])
+                        lines.append(line)
+
+                    if atom_label_i == 0:
+                        print(POS_HTOP_AO_TEMPLATE.format(
+                            atom_label, lines[0])
+                            )
+                    else:
+                        print(POS_TOP_AO_TEMPLATE.format(
+                            atom_label, lines[0])
+                            )
+                    for line in lines[1:]:
+                        print(" " * 10 + line)
             print()
 
             for atom_label_i in range(len(atom_labels)):
                 atom_label = atom_labels[atom_label_i]
-                if atom_label_i == 0:
-                    print(NEG_HTOP_AO_TEMPLATE.format(
-                        atom_label, sdict_["negative"][atom_label])
-                        )
-                    continue
+                neg_coeffs = sdict_["negative"][atom_label]
 
-                print(NEG_TOP_AO_TEMPLATE.format(
-                    atom_label, sdict_["negative"][atom_label])
-                    )
+                if not neg_coeffs:
+                    if atom_label_i == 0:
+                        print(NEG_HTOP_AO_TEMPLATE.format(
+                            atom_label, "")
+                            )
+                    else:
+                        print(NEG_TOP_AO_TEMPLATE.format(
+                            atom_label, "")
+                            )
+                else:
+                    lines = []
+                    for i in range(0, len(neg_coeffs), 3):
+                        line = (5 * ' ').join(neg_coeffs[i:i + 3])
+                        lines.append(line)
+
+                    if atom_label_i == 0:
+                        print(NEG_HTOP_AO_TEMPLATE.format(
+                            atom_label, lines[0])
+                            )
+                    else:
+                        print(NEG_TOP_AO_TEMPLATE.format(
+                            atom_label, lines[0])
+                            )
+                    for line in lines[1:]:
+                        print(" " * 10 + line)
             print('\n')
               
 
@@ -346,19 +382,25 @@ class OrcaParser:
             ao_coefficients=ao_coefficients, ao_labels=ao_labels
         )
 
-if __name__ == "__main__":
-    spectrum_parser = OrcaParser("tests/xanes.out")
+
+def print_top_states_info(
+        spectrum_filepath: str | os.PathLike,
+        orbital_data_filepath: str | os.PathLike,
+        atom_labels: list[str],
+        topn: int = 10
+    ) -> None:
+    spectrum_parser = OrcaParser(spectrum_filepath)
     xanes = spectrum_parser.get_absorption_spectrum(soc_corrected=False)
     energies = spectrum_parser.get_orbital_energies()
     states = spectrum_parser.get_excited_states()
 
-    sp_calc_parser = OrcaParser("tests/single_point_calc.out")
+    sp_calc_parser = OrcaParser(orbital_data_filepath)
     orbitals = sp_calc_parser.get_ao_coefficients()
 
-    mask = np.argsort(xanes.absorption)[::-1][:10]
+    mask = np.argsort(xanes.absorption)[::-1][:topn]
     sign_transitions = [xanes.transition[i] for i in mask]
 
-    TRANSITION_RE = r'(\d+)-\d*[.]?\d+A->(\d+)-\d*[.]?\d+A'
+    TRANSITION_RE = re.compile(r'(\d+)-\d*[.]?\d+A->(\d+)-\d*[.]?\d+A')
     sign_states = []
     for tr in sign_transitions:
         tr_match = re.match(TRANSITION_RE, tr)
@@ -372,15 +414,20 @@ if __name__ == "__main__":
         final_state_i = states.state.index(final_state)
 
         for mo_tr in states.transitions[final_state_i]:
-            print("Transition from {} MO to {} MO".format(mo_tr[0], mo_tr[1]))
-            print("Atomic orbital contributions of {} MO".format(mo_tr[0]))
+            header = "Transition from {0:3d} MO to {1:3d} MO".format(mo_tr[0], mo_tr[1])
+            print(header)
+            print(
+                "-" * int((len(header) / 2 - 3)) + " FROM " + "-" * int((len(header) / 2 - 3))
+                )
             orbitals.print_top_ao2mo(
-                from_mo=mo_tr[0], to_mo=mo_tr[0] + 1, atom_labels=['0Au', '1S', '3S']
+                from_mo=mo_tr[0], to_mo=mo_tr[0] + 1, atom_labels=atom_labels
                 )
             
-            print("Atomic orbital contributions of {} MO".format(mo_tr[1]))
+            print(
+                "-" * int((len(header) / 2 - 3)) + "  TO  " + "-" * int((len(header) / 2 - 3))
+                )
             orbitals.print_top_ao2mo(
                 from_mo=mo_tr[1], to_mo=mo_tr[1] + 1, atom_labels=['0Au', '1S', '3S']
                 )
             
-            print('\n' + '-' * 100 + '\n')
+            print("=" * int(len(header)))
